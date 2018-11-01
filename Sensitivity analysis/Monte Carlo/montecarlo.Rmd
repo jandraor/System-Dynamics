@@ -1,0 +1,331 @@
+---
+title: "Benchmark of Monte Carlo sampling strategies in R"
+author: |
+  | Jair Andrade, MSc.
+  | National University of Ireland Galway
+date: "November 2018"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+header-includes: \usepackage{amsmath}
+                 \usepackage[utf8]{inputenc}
+bibliography: bibliography.bib
+---
+
+```{r include = FALSE}
+library(knitr)
+opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align = "center", cache = TRUE)
+```
+
+### Introduction
+
+In System Dynamics, parameters are the representation of exogenous forces that affect the behaviour of a system and are often subject to uncertainty (Hekimoglu & Barlas). Hence, sensitivity analysis is used to estimate the effect of such uncertainty on model's output. Furthermore, sensitivity analysis "also helps to develop intuition about model structure and it guides the data collection efforts" [@sterman2000business]. Modelers  may  spend  much  time  on  estimation  of  possibly  unimportant  model 
+parameters. On the other hand, parameters significantly affecting output behavior should be chosen as candidates 
+for additional data collection [@sterman2000business].
+
+Monte Carlo simulation is a widely-used method for investigating uncertainties in a probabilistic way. This method is performed by means of computer algorithms that employ, in an essential way, the generation of random numbers [@Shonkwiler2009]. In System Dynamics, once parameters' ranges have been determined, random samples from this **parameter space**  are generated which then will be inputs for the System Dynamics model. In doing so, the entire input space with a reasonable sample size is covered and all plausible scenarios are evaluated.
+
+Nevertheless, there is no unique sampling strategy. On the contrary, there are many different 
+sampling strategies such as random sampling, stratified sampling, Taguchi method or latin hypercube sampling [@HekimogluBarlas], whose performance varies depending on the number of samples. In this case, performance is understood as the evenly coverage of the parameter space.
+
+In accordance with the above, a simple task whose accuracy relies upon how well random points cover evenly the parameter space is chosen as a testbed for sampling strategies. 
+
+In short, the purpose of this document is twofold: to benchmark the performance of three sampling strategies and demonstrate their implementation in **R**.
+
+
+### Estimation of $\pi$
+
+The first application of the Monte Carlo method was employed by the French naturalist
+Comte de Buffon (1707-1788) in 1733 [@Shonkwiler2009]. He imagined an experiment for
+estimating the value of $\pi$ by tossing a needle onto a
+ruled surface such as that produced by hardwood flooring.
+
+#### Unit circle
+
+```{r, warning = F, message = FALSE, fig.width= 4, fig.height= 4}
+library(tidyverse)
+start_time <- Sys.time()
+
+angle <- seq(-pi, pi, length = 180)
+df    <- data.frame(x = sin(angle), y = cos(angle))
+g     <- ggplot() +
+  geom_rect(aes(xmin = 0, ymin = 0, ymax = 2, xmax = 2), colour = "red", 
+            fill = NA) +
+  geom_polygon(aes(x + 1, y + 1), data = df, colour = "blue", fill = NA) + 
+  theme_classic() +
+  labs(x = "x", y = "y")
+print(g)
+```
+**Figure 1.** Unit circle
+$~$  
+$~$  
+
+Based on that experiment,
+a wide-spread method that facilitates understanding was devised. This method
+consists of drawing a unit circle (radius = 1) centered at (1, 1) within a square
+whose side length is equal to **1** as seen in Figure 1 (created with Tidyverse's ggplot [@ggplot]). Considering that the area of the circle is $A = \pi *r^2$, then estimating the area of the circle is equivalent to estimate $\pi$.
+
+#### Uniform distribution
+
+```{r, fig.width = 4}
+generate_random_uniform <- function(n) {
+  x <- runif(n, 0, 2)
+  y <- runif(n, 0, 2)
+  points <- data.frame(x = x, y = y)
+}
+
+inside_circle <- function(df_points, radius, xorigin, yorigin) {
+  
+  circle_equation <- function(x,y) {
+    radius <- sqrt((x - xorigin) ^ 2 + (y - yorigin) ^ 2)
+  }
+  
+  df_points <- df_points %>% 
+    mutate(radius2 = circle_equation(x, y),
+           inside_circle = ifelse(radius2 <= radius, TRUE, FALSE))
+}
+n_points_single <- 100
+radius <- 1
+set.seed(29)
+uniform_points <- generate_random_uniform(n_points_single)
+uniform_points <- inside_circle(uniform_points, radius, 1 ,1) %>% 
+  mutate(method = 'uniform')
+g1 <- g + geom_point(data = uniform_points, aes(x = x, y = y, 
+                                                shape = inside_circle), 
+                     size = 1) +
+  scale_shape_manual(values=c(1, 4)) +
+  theme(legend.position = "bottom")
+print(g1)
+```
+**Figure 2.** Random points generated with the uniform distribution
+$~$  
+$~$  
+
+Inside the square, 100 random points are generated. In this case, they are sampled
+from the uniform distribution. Circle's equation ($1^2 = (x - 1)^2 + (y - 1)^2$) is used to determine whether points fall inside or outside the circle:
+
+\begin{equation}
+ r_{random} = \sqrt{(x_{random} - 1) ^ 2 + (y_{random - 1})^2}
+\end{equation}
+
+\begin{equation}
+f(r_{random}) = \begin{cases} 
+   inside & \text{if } r_{random} \leq 1 \\
+   outside       & \text{if } r_{random} > 1
+  \end{cases}
+\end{equation}
+
+
+```{r}
+points_inside <- uniform_points %>% filter(inside_circle == TRUE) %>% nrow()
+proportion_inside <- points_inside / n_points_single
+experimental_area <- 4 * proportion_inside
+theoretical_area <- pi * (radius ^ 2)
+pct_error <- abs((experimental_area / theoretical_area - 1)) * 100
+```
+
+Random sampling allows to evenly distribute points throughout the square. By doing so,
+the area of the circle can be estimated by counting the number of points that fell
+into the circle:
+\begin{equation}
+\hat{A_{c}} = A_{s} * (\frac{n_{inside}}{n_{total}})
+\end{equation}
+i.e.,
+\begin{equation}
+\hat{A_{c}} = 4 * (\frac{`r points_inside`}{`r n_points_single`}) = `r format(experimental_area, nsmall = 2)`
+\end{equation}
+
+Therefore, the error of this estimate is **`r round(pct_error, 2)` %**
+
+```{r}
+
+calculate_pct_error <- function(n) {
+  radius <- 1
+  uniform_points <- generate_random_uniform(n)
+  uniform_points <- inside_circle(uniform_points, radius, 1 ,1)
+  points_inside <- uniform_points %>% filter(inside_circle == TRUE) %>% nrow()
+  proportion_inside <- points_inside / n
+  experimental_area <- 4 * proportion_inside
+  theoretical_area <- pi * (radius ^ 2)
+  pct_error <- abs((experimental_area / theoretical_area - 1))
+}
+  
+n_points_avg <- rep(100, 1000)
+avg_error <- mean(map_dbl(n_points_avg, calculate_pct_error))
+```
+However, one trial is not sufficient to gauge the accuracy of this method. To obtain an accurate estimate, an experiment of **1000 trials** is conducted by using Tidyverse's purrr library. By doing so, it is calculated the experiment's average error which is equal to **`r round(avg_error * 100, 2)` %**
+```{r}
+calculate_avg_error <- function(n) {
+  n_points <- rep(n, 1000)
+  avg_error <- mean(map_dbl(n_points, calculate_pct_error))
+}
+n_points_comparison <- c(100, 1000, 10000, 100000)
+avg_errors <- map_dbl(n_points_comparison, calculate_avg_error)
+df_avg_errors <- data.frame(sample_size = n_points_comparison, 
+                            avg_error = avg_errors, method = "uniform" )
+gAvgErrors <- ggplot(df_avg_errors, aes(x = as.factor(format(sample_size, 
+                                                             scientific = F, 
+                                                             big.mark = ",")), 
+                                        y = avg_error)) + 
+  geom_bar(stat = "identity", colour = NA, fill = "steelblue") + 
+  scale_y_continuous(labels = scales::percent) +
+  theme_classic() +
+  labs(y = "Average error", x = "Sample size")
+print(gAvgErrors)
+```
+**Figure 3.** Uniform distribution's performance with various sample sizes
+$~$  
+$~$ 
+
+To decrease the size of the error, sample size should be increased. Consequently, the experiment is repeated with sample sizes of 1.000, 10.000 and 100.000. The results confirm the inverse proportionality between sample size and error.
+
+#### Latin Hypercube Sampling (LHS)
+```{r}
+library(lhs)
+generate_random_lhs <- function(n) {
+  random_points <- randomLHS(n, 2)
+  df_points <- as.data.frame(random_points) %>% setNames(c('x', 'y')) %>% 
+    mutate(x = 2 * x, y = 2 * y)
+}
+lhs_points <- generate_random_lhs(n_points_single)
+lhs_points <- inside_circle(lhs_points, radius, 1 ,1) %>% mutate(method = 'LHS')
+
+superDataset <- bind_rows(uniform_points, lhs_points)
+
+g2 <- ggplot(superDataset, aes(x = x, y = y)) +
+  geom_rect(aes(xmin = 0, ymin = 0, ymax = 2, xmax = 2), colour = "red", 
+            fill = NA) +
+  geom_polygon(aes(x + 1, y + 1), data = df, colour = "blue", fill = NA) + 
+  theme_classic()+
+  geom_point(aes(shape = inside_circle), size = 1) + 
+  scale_shape_manual(values=c(1, 4)) +
+  facet_wrap(vars(method)) +
+  theme(legend.position = "bottom")
+print(g2)
+
+```
+**Figure 4.** Random points generated with the uniform distribution & LHS
+$~$  
+$~$ 
+
+There could be situations where the size of System Dynamics models does not allow running thousands of simulations inasmuch as they could be computationally expensive or even unfeasible. Thus, sampling strategies that achieve near 100 % accuracy with less sample sizes should be preferred.  
+
+According to [@McKay1979], latin hypercube sampling (LHS) is the  most  appropriate one  for simulation  models. LHS is a statistical method for generating a near-random sample of parameter values from a multidimensional distribution. As with the uniform distribution, 100 samples are generated using the LHS method and verified whether they fall inside the circle.  
+$~$  
+
+```{r}
+calculate_pct_error_lhs <- function(n) {
+  radius <- 1
+  lhs_points <- generate_random_lhs(n)
+  lhs_points <- inside_circle(lhs_points, radius, 1 ,1)
+  points_inside <- lhs_points %>% filter(inside_circle == TRUE) %>% nrow()
+  proportion_inside <- points_inside / n
+  experimental_area <- 4 * proportion_inside
+  theoretical_area <- pi * (radius ^ 2)
+  pct_error <- abs((experimental_area / theoretical_area - 1))
+}
+calculate_avg_error_lhs <- function(n) {
+  n_points <- rep(n, 1000)
+  avg_error <- mean(map_dbl(n_points, calculate_pct_error_lhs))
+}
+avg_errors_lhs <- map_dbl(n_points_comparison, calculate_avg_error_lhs)
+
+df_avg_errors_lhs <- data.frame(sample_size = n_points_comparison, 
+                            avg_error = avg_errors_lhs, method = "LHS")
+super_avg_errors <- bind_rows(df_avg_errors, df_avg_errors_lhs)
+gAvgErrors2 <- ggplot(super_avg_errors, 
+                     aes(x = as.factor(format(sample_size, 
+                                              scientific = F, 
+                                              big.mark = ",")), 
+                         y = avg_error)) + 
+  geom_bar(stat = "identity", position="dodge", aes(fill = method), 
+           colour = NA) +
+  scale_fill_manual(values = c("steelblue", "grey")) +
+  scale_y_continuous(labels = scales::percent) +
+  theme_classic() +
+  labs(y = "Average error", x = "Sample size")
+print(gAvgErrors2)
+```
+**Figure 5.** Performance comparison between uniform distribution & LHS
+$~$  
+$~$ 
+
+The experiments performed before are repeated in the same fashion:  1000 trials per each sample size are executed in order to estimate the average error. The results indicate that in estimating $\pi$ values, LHS outperforms the uniform distribution.
+
+#### Sobol sequences
+
+```{r}
+library(randtoolbox)
+generate_random_sobol <- function(n) {
+  random_points <- sobol(n, 2)
+  df_points <- as.data.frame(random_points) %>% 
+    setNames(c('x', 'y')) %>% mutate(x = 2 * x, y = 2 * y)
+}
+
+sobol_points <- generate_random_sobol(n_points_single)
+sobol_points <- inside_circle(sobol_points, radius, 1 ,1) %>%
+  mutate(method = 'Sobol')
+superDataset <- bind_rows(superDataset, sobol_points)
+superDataset$method <- factor(superDataset$method,
+                              levels = c("Sobol", "LHS", "uniform"))
+g3 <- ggplot(superDataset, aes(x = x, y = y)) +
+  geom_rect(aes(xmin = 0, ymin = 0, ymax = 2, xmax = 2), colour = "red", 
+            fill = NA) +
+  geom_polygon(aes(x + 1, y + 1), data = df, colour = "blue", fill = NA) + 
+  theme_classic()+
+  geom_point(aes(shape = inside_circle), size = 1) + 
+  scale_shape_manual(values=c(1, 4)) +
+  facet_wrap(vars(method)) +
+  theme(legend.position = "bottom")
+print(g3)
+```
+**Figure 6.** Random points generated with the uniform distribution, LHS & Sobol sequences
+$~$  
+$~$ 
+
+Within sampling strategies, there exists a group of Quasi-random (QR) sequences such as the Sobol sequences which are designed to generate  uniformly  distributed samples. Thanks to the randtoolbox package[@randtoolbox], it is possible to generate 1.000 samples using the mentioned strategy, and determine whether random points fall inside the circle. 
+
+```{r}
+calculate_pct_error_sobol <- function(n) {
+  radius <- 1
+  sobol_points <- generate_random_sobol(n)
+  sobol_points <- inside_circle(sobol_points, radius, 1 ,1)
+  points_inside <- sobol_points %>% filter(inside_circle == TRUE) %>% nrow()
+  proportion_inside <- points_inside / n
+  experimental_area <- 4 * proportion_inside
+  theoretical_area <- pi * (radius ^ 2)
+  pct_error <- abs((experimental_area / theoretical_area - 1))
+}
+calculate_avg_error_sobol <- function(n) {
+  n_points <- rep(n, 1000)
+  avg_error <- mean(map_dbl(n_points, calculate_pct_error_sobol))
+}
+avg_errors_sobol <- map_dbl(n_points_comparison, calculate_avg_error_sobol)
+df_avg_errors_sobol <- data.frame(sample_size = n_points_comparison, 
+                            avg_error = avg_errors_sobol, method = "Sobol")
+super_avg_errors <- bind_rows(super_avg_errors, df_avg_errors_sobol)
+super_avg_errors$method <- factor(super_avg_errors$method,
+                                     levels = c("Sobol", "LHS", "uniform"))
+
+gAvgErrors3 <- ggplot(super_avg_errors, 
+                     aes(x = as.factor(format(sample_size, 
+                                              scientific = F, 
+                                              big.mark = ",")), 
+                         y = avg_error,
+                         fill = method)) + 
+  geom_bar(stat = "identity", position="dodge", colour = NA) +
+  scale_fill_manual(values = c("steelblue", "darkgrey", "lightgrey")) +
+  scale_y_continuous(labels = scales::percent) +
+  theme_classic() +
+  labs(y = "Average error", x = "Sample size")
+print(gAvgErrors3)
+```
+**Figure 7.** Performance comparison between uniform distribution, LHS & Sobol sequences
+$~$  
+$~$  
+
+Finally, the procedure used for the LHS and uniform distribution is performed to the Sobol sequences. Based on the results, it can be seen that Sobol sequences underperforms with small sample sizes and outperforms with large sample sizes.
+
+
+### References
