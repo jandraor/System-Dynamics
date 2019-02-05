@@ -1,0 +1,141 @@
+---
+title: "Reproducing SD model calibration with Tidyverse and deSolve"
+author: |
+  | Jair Andrade, MSc.
+  | National University of Ireland Galway
+date: "April 2019"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+header-includes: \usepackage{amsmath}
+                 \usepackage[utf8]{inputenc}
+---
+
+```{r include = FALSE}
+library(knitr)
+opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align = "center", cache = TRUE)
+```
+
+### Introduction
+
+Demonstrate how to reproduce model calibration with 'tidyverse' and 'deSolve'
+
+"we hope this primer provides aspiring researches with the stepping stones for building new techniques that further expand the analytical toolbox of dynamic modelers"
+
+### Model
+
+It is used an auxiliary function to returns a SD model that embeds exogenous variables CO & SC. In doing so, these two variables are not required as inputs for subsequent simulations. The model take as parameters the effect of work pressure on time per order, a time constant for decreasing time per order, a time constant for increasing time per order and the initial desired time per order. Thanks to the deSolve package[cite required], it is possible to simulate the SD model and return the actual time per order's behaviour over time.
+
+```{r model}
+library(deSolve)
+library(tidyverse)
+# alpha: effect of work pressure on time per order
+# tau.td: time constant for decreasing time per order
+# tau.ti: time constant for increasing time per order
+# TPOD0: the initial desired time per order
+# CO: Incoming Orders Ot
+# SC: Service Capacity Ct
+
+generate_model <- function(CO, SC){
+  os_model <- function(params) {
+    alpha <- params[[1]]
+    tau_td <- params[[2]]
+    tau_ti <- params[[3]]
+    TPOD0 <- params[[4]]
+    STEP <- 1 / 64
+    
+    # Create time vector
+    simtime <- seq(53, 104, by = STEP)
+    
+    # Create stocks vector, with initial values
+    stocks  <- c(sDesired.Time.Order = TPOD0) # Desired time per order initialised
+    
+    # Create auxiliaries vector, with values
+    auxs    <- c(aElasticity.Work.Pressure = alpha,
+                 aQuality.Pressure = 1,
+                 aDecreasing.Time.Order = tau_td,
+                 aIncreasing.Time.Order = tau_ti,
+                 aMinimum.Order.Processing.Time = 0.1)
+    
+    orders <- approxfun(x = seq(53, 104),
+                        y = CO,
+                        method = "linear",
+                        yleft = min(CO),
+                        yright = max(CO))
+    
+    service.capacity <- approxfun(x = seq(53, 104),
+                                  y = SC,
+                                  method = "linear",
+                                  yleft = min(SC),
+                                  yright = max(SC))
+    
+    equations <- function(time, stocks, auxs){
+      with(as.list(c(stocks, auxs)),{
+        aOrders <- orders(time)
+        aDesired.Service.Capacity <- sDesired.Time.Order * aOrders
+        aActual.Service.Capacity <- service.capacity(time)
+        aRatio.SC <- aDesired.Service.Capacity / aActual.Service.Capacity
+        aWork.Pressure <- ifelse(aDesired.Service.Capacity == 0,
+                                 1000000,
+                                 (aDesired.Service.Capacity / aActual.Service.Capacity) ^ aElasticity.Work.Pressure)
+        aTime.Per.Order <- max(aMinimum.Order.Processing.Time,
+                               aQuality.Pressure * aWork.Pressure * sDesired.Time.Order)
+        # DTO = Desired time per order
+        aTime.Adjust.DTO <- ifelse(aTime.Per.Order > sDesired.Time.Order,
+                                   aIncreasing.Time.Order, aDecreasing.Time.Order)
+        fChange.DTO <- (aTime.Per.Order - sDesired.Time.Order) / aTime.Adjust.DTO
+        d_sDesired.Time.Order_dt <- fChange.DTO
+        return (list(c(d_sDesired.Time.Order_dt),
+                     TPO = aTime.Per.Order))
+      })
+    }
+    # Call Solver, and store results in a data frame
+    output <- data.frame(ode(y = stocks, times = simtime, func = equations,
+                             parms = auxs, method = "euler"))
+    result <- output %>% filter(time - round(time) == 0) %>% select(time, TPO)
+  }
+  os_model
+}
+
+reg.data <-read_csv('Data/ServiceQualityData2.csv')
+names(reg.data) <- make.names(names(reg.data))
+n.rows  <-nrow(reg.data)
+weeks   <- reg.data %>% pull(Week)
+ACT.TPO <-reg.data %>% pull(ACT.TPO)  # actual time per order
+CO      <-reg.data %>% pull(CO)  # incomining orders Ot
+SC     <- reg.data %>% pull(SC)  # actual service capacity Ct
+os_model <- generate_model(CO, SC)
+```
+
+To test the model, it is simulated using parameters estimated by other people
+
+```{r testModel}
+param_set <- data.frame(stringsAsFactors = FALSE,
+  source = c("Oliva & Sterman (2001)", "Oliva & Sterman (2001)",
+    "Oliva & Sterman (2001)", "Oliva & Sterman (2001)",
+    "Dogan(2007)", "Dogan(2007)", "Dogan(2007)", "Dogan(2007)",
+    "Oliva (1996)", "Oliva (1996)", "Oliva (1996)", "Oliva (1996)"),
+  variable = c("alpha", "tau_td", "tau_ti", "TPOD0", "alpha", "tau_td",
+    "tau_ti", "TPOD0", "alpha", "tau_td", "tau_ti", "TPOD0"),
+  value = c(-0.64, 18.83, 8140000, 1.08, -0.6, 12.48, 85600, 1.07,
+    -0.6393, 18.7321, 814000, 1.0758)
+)
+run_model <- function(par_source){
+  params <- param_set %>% filter(source == par_source) %>% pull(value)
+  result <- os_model(params) %>% mutate(source = par_source)
+}
+
+sources <- unique(param_set$source)
+sim_df  <- data.frame(time = 53:104, TPO = ACT.TPO, source = 'actual data') %>% 
+  bind_rows(map_df(sources, run_model))
+
+g <- ggplot(sim_df, aes(x = time, y = TPO, group = source)) +
+  geom_line(aes(colour = source), size = 1) +
+  scale_colour_manual(values = c('#525252', '#969696','#cccccc', '#f7f7f7')) +
+  theme_classic() +
+  labs(x = "Time", y = "Time per order")
+
+print(g)
+```
+
